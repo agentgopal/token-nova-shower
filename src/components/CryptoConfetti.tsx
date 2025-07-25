@@ -174,37 +174,6 @@ export const CryptoConfetti = () => {
     ctx.fillStyle = 'rgba(0, 0, 0, 0.05)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    setParticles(prevParticles => {
-      let newParticles: Particle[] = [];
-      const toExplode: Particle[] = [];
-
-      // Update existing particles
-      prevParticles.forEach(particle => {
-        const updated = updateParticle(particle);
-        if (updated) {
-          if (updated.phase === 'exploded' && particle.phase === 'floating') {
-            // This particle just exploded
-            toExplode.push(updated);
-          } else {
-            newParticles.push(updated);
-          }
-        }
-      });
-
-      // Create explosion fragments
-      toExplode.forEach(particle => {
-        const fragments = explodeParticle(particle);
-        newParticles.push(...fragments);
-      });
-
-      // Spawn new particles occasionally
-      if (Math.random() < 0.03) {
-        newParticles.push(createParticle());
-      }
-
-      return newParticles;
-    });
-
     // Draw all particles
     particles.forEach(particle => {
       drawParticle(ctx, particle);
@@ -212,6 +181,45 @@ export const CryptoConfetti = () => {
 
     animationRef.current = requestAnimationFrame(animate);
   };
+
+  // Separate effect for particle updates
+  useEffect(() => {
+    const updateLoop = () => {
+      setParticles(prevParticles => {
+        let newParticles: Particle[] = [];
+        const toExplode: Particle[] = [];
+
+        // Update existing particles
+        prevParticles.forEach(particle => {
+          const updated = updateParticle(particle);
+          if (updated) {
+            if (updated.phase === 'exploded' && particle.phase === 'floating') {
+              // This particle just exploded
+              toExplode.push(updated);
+            } else {
+              newParticles.push(updated);
+            }
+          }
+        });
+
+        // Create explosion fragments
+        toExplode.forEach(particle => {
+          const fragments = explodeParticle(particle);
+          newParticles.push(...fragments);
+        });
+
+        // Spawn new particles occasionally
+        if (Math.random() < 0.05) {
+          newParticles.push(createParticle());
+        }
+
+        return newParticles;
+      });
+    };
+
+    const updateInterval = setInterval(updateLoop, 16); // ~60fps
+    return () => clearInterval(updateInterval);
+  }, []);
 
   const handleClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = canvasRef.current?.getBoundingClientRect();
@@ -240,22 +248,16 @@ export const CryptoConfetti = () => {
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
 
-    // Start animation
+    // Start animation loop
     animationRef.current = requestAnimationFrame(animate);
-
-    // Auto-spawn particles
-    const spawnInterval = setInterval(() => {
-      setParticles(prev => [...prev, createParticle()]);
-    }, 1000);
 
     return () => {
       if (animationRef.current) {
         cancelAnimationFrame(animationRef.current);
       }
-      clearInterval(spawnInterval);
       window.removeEventListener('resize', resizeCanvas);
     };
-  }, []);
+  }, [particles]);
 
   return (
     <canvas
