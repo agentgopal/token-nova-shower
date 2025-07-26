@@ -178,10 +178,7 @@ export const CryptoConfetti = () => {
           newParticles.push(...fragments);
         });
 
-        // Spawn new particles occasionally
-        if (Math.random() < 0.05) {
-          newParticles.push(createParticle());
-        }
+        // Remove automatic spawning - only spawn on click/hover
 
         return newParticles;
       });
@@ -204,6 +201,17 @@ export const CryptoConfetti = () => {
     }
     
     setParticles(prev => [...prev, ...newParticles]);
+  };
+
+  const handleMouseMove = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    // Create particles on hover with some probability to avoid too many
+    if (Math.random() < 0.05) {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      
+      const x = event.clientX - rect.left;
+      setParticles(prev => [...prev, createParticle(x)]);
+    }
   };
 
   useEffect(() => {
@@ -240,6 +248,7 @@ export const CryptoConfetti = () => {
     <canvas
       ref={canvasRef}
       onClick={handleClick}
+      onMouseMove={handleMouseMove}
       className="fixed inset-0 pointer-events-auto cursor-pointer"
       style={{ zIndex: 10 }}
     />
