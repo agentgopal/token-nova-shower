@@ -194,6 +194,7 @@ export const CryptoConfetti = () => {
     if (!rect) return;
     
     const clickX = event.clientX - rect.left;
+    console.log('Click detected at:', clickX);
     
     // Create multiple particles at click position
     const newParticles: Particle[] = [];
@@ -201,6 +202,7 @@ export const CryptoConfetti = () => {
       newParticles.push(createParticle(clickX + (Math.random() - 0.5) * 100));
     }
     
+    console.log('Created particles:', newParticles.length);
     setParticles(prev => [...prev, ...newParticles]);
   };
 
@@ -223,6 +225,10 @@ export const CryptoConfetti = () => {
     const img = new Image();
     img.onload = () => {
       bitcoinImageRef.current = img;
+      console.log('Bitcoin SVG loaded successfully');
+    };
+    img.onerror = () => {
+      console.error('Failed to load Bitcoin SVG');
     };
     img.src = '/src/assets/bitcoin.svg';
 
