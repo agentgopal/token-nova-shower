@@ -1,11 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 
-interface CryptoToken {
-  symbol: string;
-  color: string;
-  logo: string;
-}
-
 interface Particle {
   id: number;
   x: number;
@@ -15,7 +9,6 @@ interface Particle {
   size: number;
   rotation: number;
   rotationSpeed: number;
-  token: CryptoToken;
   phase: 'floating' | 'exploded' | 'scattered';
   opacity: number;
   scale: number;
@@ -23,25 +16,14 @@ interface Particle {
   maxLife: number;
 }
 
-const CRYPTO_TOKENS: CryptoToken[] = [
-  { symbol: '₿', color: '#f7931a', logo: 'BTC' },
-  { symbol: 'Ξ', color: '#627eea', logo: 'ETH' },
-  { symbol: '◎', color: '#00d4aa', logo: 'SOL' },
-  { symbol: '₳', color: '#0033ad', logo: 'ADA' },
-  { symbol: '◯', color: '#26cc8b', logo: 'DOT' },
-  { symbol: '⟁', color: '#345d9d', logo: 'AVAX' },
-  { symbol: '◐', color: '#f0b90b', logo: 'BNB' },
-  { symbol: '◑', color: '#ff6b35', logo: 'MATIC' },
-];
-
 export const CryptoConfetti = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [particles, setParticles] = useState<Particle[]>([]);
   const animationRef = useRef<number>();
   const particleIdRef = useRef(0);
+  const bitcoinImageRef = useRef<HTMLImageElement>();
 
   const createParticle = (x?: number): Particle => {
-    const token = CRYPTO_TOKENS[Math.floor(Math.random() * CRYPTO_TOKENS.length)];
     const startX = x ?? Math.random() * window.innerWidth;
     
     return {
@@ -50,10 +32,9 @@ export const CryptoConfetti = () => {
       y: window.innerHeight + 50,
       vx: (Math.random() - 0.5) * 2,
       vy: -2 - Math.random() * 3,
-      size: 20 + Math.random() * 30,
+      size: 40 + Math.random() * 20,
       rotation: 0,
       rotationSpeed: (Math.random() - 0.5) * 0.2,
-      token,
       phase: 'floating',
       opacity: 1,
       scale: 1,
@@ -79,7 +60,7 @@ export const CryptoConfetti = () => {
         size: particle.size * (0.3 + Math.random() * 0.4),
         rotation: Math.random() * Math.PI * 2,
         rotationSpeed: (Math.random() - 0.5) * 0.4,
-        token: particle.token,
+        
         phase: 'exploded',
         opacity: 1,
         scale: 1,
@@ -131,6 +112,8 @@ export const CryptoConfetti = () => {
   };
 
   const drawParticle = (ctx: CanvasRenderingContext2D, particle: Particle) => {
+    if (!bitcoinImageRef.current) return;
+    
     ctx.save();
     ctx.globalAlpha = particle.opacity;
     ctx.translate(particle.x, particle.y);
@@ -139,26 +122,13 @@ export const CryptoConfetti = () => {
     
     // Add glow effect
     if (particle.phase === 'floating') {
-      ctx.shadowColor = particle.token.color;
+      ctx.shadowColor = '#F7931A';
       ctx.shadowBlur = 15;
     }
     
-    // Draw token symbol
-    ctx.fillStyle = particle.token.color;
-    ctx.font = `bold ${particle.size}px Arial`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(particle.token.symbol, 0, 0);
-    
-    // Draw token name for larger particles
-    if (particle.size > 30 && particle.phase === 'floating') {
-      ctx.font = `bold ${particle.size * 0.3}px Arial`;
-      ctx.fillStyle = '#ffffff';
-      ctx.strokeStyle = particle.token.color;
-      ctx.lineWidth = 2;
-      ctx.strokeText(particle.token.logo, 0, particle.size * 0.7);
-      ctx.fillText(particle.token.logo, 0, particle.size * 0.7);
-    }
+    // Draw Bitcoin SVG
+    const size = particle.size;
+    ctx.drawImage(bitcoinImageRef.current, -size/2, -size/2, size, size);
     
     ctx.restore();
   };
@@ -239,6 +209,13 @@ export const CryptoConfetti = () => {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+
+    // Load Bitcoin SVG
+    const img = new Image();
+    img.onload = () => {
+      bitcoinImageRef.current = img;
+    };
+    img.src = '/src/assets/bitcoin.svg';
 
     const resizeCanvas = () => {
       canvas.width = window.innerWidth;
