@@ -30,9 +30,9 @@ export const CryptoConfetti = () => {
     return {
       id: particleIdRef.current++,
       x: startX,
-      y: window.innerHeight + 50,
+      y: -50, // Start from top
       vx: (Math.random() - 0.5) * 2,
-      vy: -2 - Math.random() * 3,
+      vy: 2 + Math.random() * 3, // Float downward
       size: 40 + Math.random() * 20,
       rotation: 0,
       rotationSpeed: (Math.random() - 0.5) * 0.2,
@@ -83,8 +83,8 @@ export const CryptoConfetti = () => {
       updated.rotation += updated.rotationSpeed;
       
       // Check if particle should explode
-      const explodeHeight = window.innerHeight * (0.2 + Math.random() * 0.4);
-      if (updated.y <= explodeHeight) {
+      const explodeHeight = window.innerHeight * (0.6 + Math.random() * 0.3);
+      if (updated.y >= explodeHeight) {
         updated.phase = 'exploded';
         return updated;
       }
