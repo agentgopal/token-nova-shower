@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import './confetti.css';
 
 interface Particle {
   id: number;
@@ -249,8 +250,7 @@ export const CryptoConfetti = () => {
       ref={canvasRef}
       onClick={handleClick}
       onMouseMove={handleMouseMove}
-      className="fixed inset-0 pointer-events-auto cursor-pointer"
-      style={{ zIndex: 10 }}
+      className="confetti-canvas"
     />
   );
 };

@@ -1,0 +1,75 @@
+/* Crypto Confetti Component Styles */
+
+.confetti-canvas {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: auto;
+  cursor: pointer;
+  z-index: 10;
+}
+
+/* Hover effects for interactive canvas */
+.confetti-canvas:hover {
+  cursor: crosshair;
+}
+
+/* Optional: Add smooth transitions for any canvas interactions */
+.confetti-canvas {
+  transition: opacity 0.2s ease-in-out;
+}
+
+/* Utility classes for confetti particles (if needed for future HTML-based particles) */
+.confetti-particle {
+  position: absolute;
+  pointer-events: none;
+}
+
+.confetti-particle-floating {
+  animation: float-up 3s ease-out forwards;
+}
+
+.confetti-particle-exploded {
+  animation: scatter 2s ease-out forwards;
+}
+
+/* Keyframes for potential HTML-based particle animations */
+@keyframes float-up {
+  0% {
+    transform: translateY(100vh) rotate(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(-20vh) rotate(360deg);
+    opacity: 0.8;
+  }
+}
+
+@keyframes scatter {
+  0% {
+    transform: scale(1) rotate(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.3) rotate(720deg);
+    opacity: 0;
+  }
+}
+
+/* Container for confetti overlay */
+.confetti-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* Interactive overlay */
+.confetti-interactive {
+  pointer-events: auto;
+}
