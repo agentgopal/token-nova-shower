@@ -1,0 +1,1738 @@
+// ========================================================================================
+// ETHEREUM WALLET BACKEND - SECURE IMPLEMENTATION
+// ========================================================================================
+
+// ====================================
+// 1. PACKAGE.JSON
+// ====================================
+/*
+{
+  "name": "secure-ethereum-wallet-backend",
+  "version": "1.0.0",
+  "description": "Secure Ethereum wallet backend with key management",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "express-rate-limit": "^7.1.5",
+    "express-validator": "^7.0.1",
+    "mysql2": "^3.6.5",
+    "ethers": "^6.8.1",
+    "crypto": "^1.0.1",
+    "bcrypt": "^5.1.1",
+    "jsonwebtoken": "^9.0.2",
+    "dotenv": "^16.3.1",
+    "winston": "^3.11.0",
+    "joi": "^17.11.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
+*/
+
+// ====================================
+// 2. DATABASE SCHEMA (database/schema.sql)
+// ====================================
+/*
+-- Create database
+CREATE DATABASE IF NOT EXISTS ethereum_wallet_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE ethereum_wallet_db;
+
+-- Users table
+CREATE TABLE users (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    username VARCHAR(100) UNIQUE NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    is_active BOOLEAN DEFAULT TRUE,
+    INDEX idx_email (email),
+    INDEX idx_username (username)
+);
+
+-- Wallets table with encrypted fields
+CREATE TABLE wallets (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    wallet_address VARCHAR(42) UNIQUE NOT NULL,
+    encrypted_private_key TEXT NOT NULL,
+    encrypted_mnemonic TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    wallet_name VARCHAR(100) DEFAULT 'Primary Wallet',
+    balance_wei VARCHAR(100) DEFAULT '0',
+    nonce_counter INT DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    is_active BOOLEAN DEFAULT TRUE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    INDEX idx_user_id (user_id),
+    INDEX idx_wallet_address (wallet_address)
+);
+
+-- Transactions table
+CREATE TABLE transactions (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    wallet_id INT NOT NULL,
+    transaction_hash VARCHAR(66) UNIQUE,
+    from_address VARCHAR(42) NOT NULL,
+    to_address VARCHAR(42) NOT NULL,
+    amount_wei VARCHAR(100) NOT NULL,
+    gas_price VARCHAR(100),
+    gas_limit VARCHAR(100),
+    gas_used VARCHAR(100),
+    transaction_fee_wei VARCHAR(100),
+    service_fee_wei VARCHAR(100) DEFAULT '0',
+    status ENUM('pending', 'confirmed', 'failed') DEFAULT 'pending',
+    block_number BIGINT,
+    transaction_type ENUM('send', 'receive', 'internal') DEFAULT 'send',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    confirmed_at TIMESTAMP NULL,
+    FOREIGN KEY (wallet_id) REFERENCES wallets(id) ON DELETE CASCADE,
+    INDEX idx_wallet_id (wallet_id),
+    INDEX idx_transaction_hash (transaction_hash),
+    INDEX idx_from_address (from_address),
+    INDEX idx_to_address (to_address),
+    INDEX idx_status (status)
+);
+
+-- Rate limiting table
+CREATE TABLE rate_limits (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    endpoint VARCHAR(100) NOT NULL,
+    request_count INT DEFAULT 1,
+    window_start TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE KEY unique_user_endpoint (user_id, endpoint),
+    INDEX idx_user_endpoint (user_id, endpoint)
+);
+
+-- Audit logs table
+CREATE TABLE audit_logs (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT,
+    action VARCHAR(100) NOT NULL,
+    resource_type VARCHAR(50),
+    resource_id INT,
+    ip_address VARCHAR(45),
+    user_agent TEXT,
+    details JSON,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+    INDEX idx_user_id (user_id),
+    INDEX idx_action (action),
+    INDEX idx_created_at (created_at)
+);
+*/
+
+// ====================================
+// 3. ENVIRONMENT CONFIGURATION (.env)
+// ====================================
+/*
+# Server Configuration
+PORT=3000
+NODE_ENV=production
+
+# Database Configuration
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=your_db_user
+DB_PASSWORD=your_secure_db_password
+DB_NAME=ethereum_wallet_db
+
+# Ethereum Configuration
+ETHEREUM_RPC_URL=https://mainnet.infura.io/v3/YOUR_INFURA_PROJECT_ID
+ETHEREUM_TESTNET_RPC_URL=https://goerli.infura.io/v3/YOUR_INFURA_PROJECT_ID
+NETWORK=mainnet
+
+# Security Configuration
+JWT_SECRET=your_super_secure_jwt_secret_key_min_64_chars_recommended
+ENCRYPTION_KEY=your_32_byte_encryption_key_for_aes_256_exactly_32_chars
+ENCRYPTION_IV_LENGTH=16
+
+# Rate Limiting
+RATE_LIMIT_WINDOW_MS=900000
+RATE_LIMIT_MAX_REQUESTS=100
+
+# Service Fees (in basis points, 100 = 1%)
+SERVICE_FEE_BASIS_POINTS=50
+
+# Funding Configuration
+AUTO_FUNDING_ENABLED=true
+FUNDING_AMOUNT_ETH=0.01
+FUNDING_WALLET_PRIVATE_KEY=your_funding_wallet_private_key
+*/
+
+// ====================================
+// 4. DATABASE CONNECTION (config/database.js)
+// ====================================
+const mysql = require('mysql2/promise');
+require('dotenv').config();
+
+const createDatabaseConnection = async () => {
+    try {
+        const connection = await mysql.createConnection({
+            host: process.env.DB_HOST || 'localhost',
+            port: process.env.DB_PORT || 3306,
+            user: process.env.DB_USER,
+            password: process.env.DB_PASSWORD,
+            database: process.env.DB_NAME,
+            charset: 'utf8mb4',
+            timezone: '+00:00',
+            acquireTimeout: 60000,
+            timeout: 60000,
+            reconnect: true
+        });
+
+        // Test connection
+        await connection.ping();
+        console.error('Failed to update transaction status:', error);
+    }
+};
+
+module.exports = {
+    sendEthereumTransaction,
+    getTransactionHistory,
+    updateTransactionStatus
+};
+
+// ====================================
+// 13. FUNDING SERVICE (services/fundingService.js)
+// ====================================
+const { createConnectionPool } = require('../config/database');
+const { sendTransaction, parseEther, formatEther, getWalletBalance } = require('../utils/ethereum');
+const { logAuditEvent } = require('../utils/auditLogger');
+
+const autoFundWallet = async (walletAddress, userId, req) => {
+    try {
+        const autoFundingEnabled = process.env.AUTO_FUNDING_ENABLED === 'true';
+        if (!autoFundingEnabled) {
+            return { funded: false, reason: 'Auto funding disabled' };
+        }
+
+        const fundingWalletPrivateKey = process.env.FUNDING_WALLET_PRIVATE_KEY;
+        if (!fundingWalletPrivateKey) {
+            throw new Error('Funding wallet not configured');
+        }
+
+        const fundingAmount = parseEther(process.env.FUNDING_AMOUNT_ETH || '0.01');
+        const currentBalance = await getWalletBalance(walletAddress);
+
+        // Only fund if balance is very low (less than funding amount)
+        if (BigInt(currentBalance) >= fundingAmount) {
+            return { funded: false, reason: 'Sufficient balance' };
+        }
+
+        const txData = {
+            to: walletAddress,
+            value: fundingAmount.toString()
+        };
+
+        const txResponse = await sendTransaction(fundingWalletPrivateKey, txData);
+
+        // Log funding transaction
+        const pool = createConnectionPool();
+        const [wallets] = await pool.execute(
+            'SELECT id FROM wallets WHERE wallet_address = ?',
+            [walletAddress]
+        );
+
+        if (wallets.length > 0) {
+            await pool.execute(
+                `INSERT INTO transactions (wallet_id, from_address, to_address, amount_wei, 
+                 transaction_hash, transaction_type, status) VALUES (?, ?, ?, ?, ?, 'receive', 'pending')`,
+                [wallets[0].id, 'funding', walletAddress, fundingAmount.toString(), txResponse.hash]
+            );
+        }
+
+        // Log audit event
+        await logAuditEvent(userId, 'WALLET_FUNDED', 'wallet', wallets[0]?.id, req, {
+            walletAddress,
+            fundingAmount: formatEther(fundingAmount),
+            transactionHash: txResponse.hash
+        });
+
+        return {
+            funded: true,
+            amount: formatEther(fundingAmount),
+            transactionHash: txResponse.hash
+        };
+
+    } catch (error) {
+        console.error('Auto funding failed:', error);
+        return { funded: false, reason: error.message };
+    }
+};
+
+const checkFundingEligibility = async (walletAddress) => {
+    try {
+        const balance = await getWalletBalance(walletAddress);
+        const minBalance = parseEther(process.env.FUNDING_AMOUNT_ETH || '0.01');
+        
+        return {
+            eligible: BigInt(balance) < minBalance,
+            currentBalance: formatEther(balance),
+            minimumBalance: formatEther(minBalance)
+        };
+    } catch (error) {
+        throw new Error(`Failed to check funding eligibility: ${error.message}`);
+    }
+};
+
+module.exports = {
+    autoFundWallet,
+    checkFundingEligibility
+};
+
+// ====================================
+// 14. WALLET CONTROLLER (controllers/walletController.js)
+// ====================================
+const { createUserWallet, getUserWallet } = require('../services/walletService');
+const { autoFundWallet } = require('../services/fundingService');
+
+const createWallet = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { walletName } = req.body;
+
+        const wallet = await createUserWallet(userId, walletName, req);
+
+        // Auto-fund wallet if enabled
+        const fundingResult = await autoFundWallet(wallet.address, userId, req);
+
+        res.status(201).json({
+            success: true,
+            message: 'Wallet created successfully',
+            data: {
+                wallet,
+                funding: fundingResult
+            }
+        });
+
+    } catch (error) {
+        console.error('Create wallet error:', error);
+        
+        if (error.message.includes('already has an active wallet')) {
+            return res.status(409).json({
+                success: false,
+                message: 'User already has an active wallet'
+            });
+        }
+
+        res.status(500).json({
+            success: false,
+            message: 'Failed to create wallet'
+        });
+    }
+};
+
+const getWallet = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const wallet = await getUserWallet(userId);
+
+        if (!wallet) {
+            return res.status(404).json({
+                success: false,
+                message: 'No wallet found for user'
+            });
+        }
+
+        res.json({
+            success: true,
+            data: { wallet }
+        });
+
+    } catch (error) {
+        console.error('Get wallet error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to retrieve wallet'
+        });
+    }
+};
+
+const getWalletBalance = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const wallet = await getUserWallet(userId);
+
+        if (!wallet) {
+            return res.status(404).json({
+                success: false,
+                message: 'No wallet found for user'
+            });
+        }
+
+        const { formatEther } = require('../utils/ethereum');
+
+        res.json({
+            success: true,
+            data: {
+                address: wallet.address,
+                balance: {
+                    wei: wallet.balance,
+                    eth: formatEther(wallet.balance)
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('Get balance error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to retrieve balance'
+        });
+    }
+};
+
+module.exports = {
+    createWallet,
+    getWallet,
+    getWalletBalance
+};
+
+// ====================================
+// 15. TRANSACTION CONTROLLER (controllers/transactionController.js)
+// ====================================
+const { sendEthereumTransaction, getTransactionHistory } = require('../services/transactionService');
+const { checkFundingEligibility, autoFundWallet } = require('../services/fundingService');
+const { getUserWallet } = require('../services/walletService');
+
+const sendTransaction = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { toAddress, amount, gasPrice, gasLimit } = req.body;
+
+        // Check if user has sufficient balance (including auto-funding)
+        const wallet = await getUserWallet(userId);
+        if (!wallet) {
+            return res.status(404).json({
+                success: false,
+                message: 'No wallet found for user'
+            });
+        }
+
+        // Check funding eligibility and auto-fund if needed
+        const fundingCheck = await checkFundingEligibility(wallet.address);
+        if (fundingCheck.eligible) {
+            await autoFundWallet(wallet.address, userId, req);
+        }
+
+        const transaction = await sendEthereumTransaction(userId, {
+            toAddress,
+            amount,
+            gasPrice,
+            gasLimit
+        }, req);
+
+        res.json({
+            success: true,
+            message: 'Transaction sent successfully',
+            data: { transaction }
+        });
+
+    } catch (error) {
+        console.error('Send transaction error:', error);
+        
+        if (error.message.includes('insufficient funds')) {
+            return res.status(400).json({
+                success: false,
+                message: 'Insufficient funds for transaction'
+            });
+        }
+
+        if (error.message.includes('invalid address')) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid recipient address'
+            });
+        }
+
+        res.status(500).json({
+            success: false,
+            message: 'Failed to send transaction'
+        });
+    }
+};
+
+const getTransactions = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const limit = parseInt(req.query.limit) || 50;
+        const offset = parseInt(req.query.offset) || 0;
+
+        const transactions = await getTransactionHistory(userId, limit, offset);
+
+        res.json({
+            success: true,
+            data: {
+                transactions,
+                pagination: {
+                    limit,
+                    offset,
+                    total: transactions.length
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('Get transactions error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to retrieve transaction history'
+        });
+    }
+};
+
+const estimateTransactionFee = async (req, res) => {
+    try {
+        const { toAddress, amount } = req.body;
+        const { estimateGas, parseEther } = require('../utils/ethereum');
+
+        const txData = {
+            to: toAddress,
+            value: parseEther(amount).toString()
+        };
+
+        const gasEstimate = await estimateGas(txData);
+        const { formatEther } = require('../utils/ethereum');
+
+        res.json({
+            success: true,
+            data: {
+                gasLimit: gasEstimate.gasLimit,
+                gasPrice: gasEstimate.gasPrice,
+                estimatedFee: {
+                    wei: (BigInt(gasEstimate.gasLimit) * BigInt(gasEstimate.gasPrice)).toString(),
+                    eth: formatEther((BigInt(gasEstimate.gasLimit) * BigInt(gasEstimate.gasPrice)).toString())
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('Estimate fee error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to estimate transaction fee'
+        });
+    }
+};
+
+module.exports = {
+    sendTransaction,
+    getTransactions,
+    estimateTransactionFee
+};
+
+// ====================================
+// 16. AUTHENTICATION CONTROLLER (controllers/authController.js)
+// ====================================
+const jwt = require('jsonwebtoken');
+const { createConnectionPool } = require('../config/database');
+const { hashPassword, verifyPassword } = require('../utils/encryption');
+const { logAuditEvent } = require('../utils/auditLogger');
+
+const generateAccessToken = (userId) => {
+    return jwt.sign(
+        { userId },
+        process.env.JWT_SECRET,
+        { expiresIn: '24h' }
+    );
+};
+
+const register = async (req, res) => {
+    const pool = createConnectionPool();
+    let connection;
+    
+    try {
+        const { username, email, password } = req.body;
+
+        connection = await pool.getConnection();
+        await connection.beginTransaction();
+
+        // Check if user already exists
+        const [existingUsers] = await connection.execute(
+            'SELECT id FROM users WHERE email = ? OR username = ?',
+            [email, username]
+        );
+
+        if (existingUsers.length > 0) {
+            return res.status(409).json({
+                success: false,
+                message: 'User already exists with this email or username'
+            });
+        }
+
+        // Hash password
+        const passwordHash = await hashPassword(password);
+
+        // Create user
+        const [result] = await connection.execute(
+            'INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)',
+            [username, email, passwordHash]
+        );
+
+        const userId = result.insertId;
+        await connection.commit();
+
+        // Generate token
+        const token = generateAccessToken(userId);
+
+        // Log audit event
+        await logAuditEvent(userId, 'USER_REGISTERED', 'user', userId, req);
+
+        res.status(201).json({
+            success: true,
+            message: 'User registered successfully',
+            data: {
+                userId,
+                username,
+                email,
+                token
+            }
+        });
+
+    } catch (error) {
+        if (connection) {
+            await connection.rollback();
+        }
+        console.error('Registration error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Registration failed'
+        });
+    } finally {
+        if (connection) {
+            connection.release();
+        }
+    }
+};
+
+const login = async (req, res) => {
+    try {
+        const { email, password } = req.body;
+        const pool = createConnectionPool();
+
+        // Find user
+        const [users] = await pool.execute(
+            'SELECT id, username, email, password_hash, is_active FROM users WHERE email = ?',
+            [email]
+        );
+
+        if (users.length === 0) {
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid credentials'
+            });
+        }
+
+        const user = users[0];
+
+        if (!user.is_active) {
+            return res.status(401).json({
+                success: false,
+                message: 'Account is deactivated'
+            });
+        }
+
+        // Verify password
+        const isValidPassword = await verifyPassword(password, user.password_hash);
+        if (!isValidPassword) {
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid credentials'
+            });
+        }
+
+        // Generate token
+        const token = generateAccessToken(user.id);
+
+        // Log audit event
+        await logAuditEvent(user.id, 'USER_LOGIN', 'user', user.id, req);
+
+        res.json({
+            success: true,
+            message: 'Login successful',
+            data: {
+                userId: user.id,
+                username: user.username,
+                email: user.email,
+                token
+            }
+        });
+
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Login failed'
+        });
+    }
+};
+
+const logout = async (req, res) => {
+    try {
+        const userId = req.user.id;
+
+        // Log audit event
+        await logAuditEvent(userId, 'USER_LOGOUT', 'user', userId, req);
+
+        res.json({
+            success: true,
+            message: 'Logout successful'
+        });
+
+    } catch (error) {
+        console.error('Logout error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Logout failed'
+        });
+    }
+};
+
+module.exports = {
+    register,
+    login,
+    logout
+};
+
+// ====================================
+// 17. ROUTES (routes/walletRoutes.js)
+// ====================================
+const express = require('express');
+const { authenticateToken } = require('../middleware/auth');
+const { rateLimiter } = require('../middleware/rateLimiter');
+const { validateRequest, createWalletSchema } = require('../middleware/validation');
+const { createWallet, getWallet, getWalletBalance } = require('../controllers/walletController');
+
+const router = express.Router();
+
+// Create wallet
+router.post('/create',
+    authenticateToken,
+    rateLimiter('create_wallet', 1, 3600000), // 1 request per hour
+    validateRequest(createWalletSchema),
+    createWallet
+);
+
+// Get wallet
+router.get('/',
+    authenticateToken,
+    rateLimiter('get_wallet', 10, 900000), // 10 requests per 15 minutes
+    getWallet
+);
+
+// Get wallet balance
+router.get('/balance',
+    authenticateToken,
+    rateLimiter('get_balance', 20, 900000), // 20 requests per 15 minutes
+    getWalletBalance
+);
+
+module.exports = router;
+
+// ====================================
+// 18. TRANSACTION ROUTES (routes/transactionRoutes.js)
+// ====================================
+const express = require('express');
+const { authenticateToken } = require('../middleware/auth');
+const { rateLimiter } = require('../middleware/rateLimiter');
+const { validateRequest, sendTransactionSchema } = require('../middleware/validation');
+const { sendTransaction, getTransactions, estimateTransactionFee } = require('../controllers/transactionController');
+
+const router = express.Router();
+
+// Send transaction
+router.post('/send',
+    authenticateToken,
+    rateLimiter('send_transaction', 5, 900000), // 5 transactions per 15 minutes
+    validateRequest(sendTransactionSchema),
+    sendTransaction
+);
+
+// Get transaction history
+router.get('/history',
+    authenticateToken,
+    rateLimiter('get_transactions', 20, 900000), // 20 requests per 15 minutes
+    getTransactions
+);
+
+// Estimate transaction fee
+router.post('/estimate-fee',
+    authenticateToken,
+    rateLimiter('estimate_fee', 10, 900000), // 10 requests per 15 minutes
+    estimateTransactionFee
+);
+
+module.exports = router;
+
+// ====================================
+// 19. AUTH ROUTES (routes/authRoutes.js)
+// ====================================
+const express = require('express');
+const { rateLimiter } = require('../middleware/rateLimiter');
+const { register, login, logout } = require('../controllers/authController');
+const { authenticateToken } = require('../middleware/auth');
+
+const router = express.Router();
+
+// Register
+router.post('/register', register);
+
+// Login with rate limiting
+router.post('/login',
+    rateLimiter('login', 5, 900000), // 5 login attempts per 15 minutes
+    login
+);
+
+// Logout
+router.post('/logout',
+    authenticateToken,
+    logout
+);
+
+module.exports = router;
+
+// ====================================
+// 20. MAIN SERVER FILE (server.js)
+// ====================================
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+require('dotenv').config();
+
+const { createDatabaseConnection } = require('./config/database');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Security middleware
+app.use(helmet({
+    contentSecurityPolicy: {
+        directives: {
+            defaultSrc: ["'self'"],
+            styleSrc: ["'self'", "'unsafe-inline'"],
+            scriptSrc: ["'self'"],
+            imgSrc: ["'self'", "data:", "https:"],
+        },
+    },
+}));
+
+// CORS configuration
+app.use(cors({
+    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// Global rate limiting
+const globalLimiter = rateLimit({
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 900000, // 15 minutes
+    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
+    message: {
+        success: false,
+        message: 'Too many requests from this IP, please try again later.'
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+app.use(globalLimiter);
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Routes
+app.use('/api/auth', require('./routes/authRoutes'));
+app.use('/api/wallet', require('./routes/walletRoutes'));
+app.use('/api/transactions', require('./routes/transactionRoutes'));
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+    res.json({
+        success: true,
+        message: 'Ethereum Wallet API is running',
+        timestamp: Date.now(),
+        version: '1.0.0'
+    });
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+    console.error('Error:', err);
+    
+    res.status(err.status || 500).json({
+        success: false,
+        message: process.env.NODE_ENV === 'production' 
+            ? 'Internal server error' 
+            : err.message
+    });
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+    res.status(404).json({
+        success: false,
+        message: 'API endpoint not found'
+    });
+});
+
+// Start server
+const startServer = async () => {
+    try {
+        // Test database connection
+        await createDatabaseConnection();
+        
+        app.listen(PORT, () => {
+            console.log(`✅ Server running on port ${PORT}`);
+            console.log(`🔗 Health check: http://localhost:${PORT}/api/health`);
+            console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+            console.log(`🔐 Security: Helmet, CORS, Rate limiting enabled`);
+        });
+    } catch (error) {
+        console.error('❌ Failed to start server:', error);
+        process.exit(1);
+    }
+};
+
+startServer();
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+    console.log('\n⚠️  Received SIGINT. Shutting down gracefully...');
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    console.log('\n⚠️  Received SIGTERM. Shutting down gracefully...');
+    process.exit(0);
+});
+
+// ====================================
+// 21. DEPLOYMENT SCRIPT (scripts/deploy.js)
+// ====================================
+const { exec } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+
+const deploymentChecklist = async () => {
+    console.log('🚀 Ethereum Wallet Backend Deployment Checklist\n');
+    
+    const checks = [
+        {
+            name: 'Environment Variables',
+            check: () => {
+                const requiredVars = [
+                    'DB_HOST', 'DB_USER', 'DB_PASSWORD', 'DB_NAME',
+                    'JWT_SECRET', 'ENCRYPTION_KEY', 'ETHEREUM_RPC_URL'
+                ];
+                return requiredVars.every(var => process.env[var]);
+            }
+        },
+        {
+            name: 'Database Connection',
+            check: async () => {
+                try {
+                    const { createDatabaseConnection } = require('../config/database');
+                    await createDatabaseConnection();
+                    return true;
+                } catch (error) {
+                    console.error('Database connection failed:', error.message);
+                    return false;
+                }
+            }
+        },
+        {
+            name: 'Ethereum RPC Connection',
+            check: async () => {
+                try {
+                    const { createEthereumProvider } = require('../utils/ethereum');
+                    const provider = createEthereumProvider();
+                    await provider.getBlockNumber();
+                    return true;
+                } catch (error) {
+                    console.error('Ethereum RPC connection failed:', error.message);
+                    return false;
+                }
+            }
+        }
+    ];
+
+    for (const check of checks) {
+        try {
+            const result = typeof check.check === 'function' ? await check.check() : check.check();
+            console.log(`${result ? '✅' : '❌'} ${check.name}`);
+        } catch (error) {
+            console.log(`❌ ${check.name}: ${error.message}`);
+        }
+    }
+
+    console.log('\n📋 Pre-deployment Security Reminders:');
+    console.log('• Ensure HTTPS is enabled in production');
+    console.log('• Verify database credentials are secure');
+    console.log('• Confirm encryption keys are properly generated');
+    console.log('• Test rate limiting configurations');
+    console.log('• Review audit logging setup');
+    console.log('• Validate backup procedures');
+};
+
+if (require.main === module) {
+    deploymentChecklist();
+}
+
+module.exports = { deploymentChecklist };log('✅ Database connected successfully');
+        return connection;
+    } catch (error) {
+        console.error('❌ Database connection failed:', error.message);
+        throw error;
+    }
+};
+
+const createConnectionPool = () => {
+    return mysql.createPool({
+        host: process.env.DB_HOST || 'localhost',
+        port: process.env.DB_PORT || 3306,
+        user: process.env.DB_USER,
+        password: process.env.DB_PASSWORD,
+        database: process.env.DB_NAME,
+        waitForConnections: true,
+        connectionLimit: 10,
+        queueLimit: 0,
+        acquireTimeout: 60000,
+        timeout: 60000,
+        reconnect: true,
+        charset: 'utf8mb4',
+        timezone: '+00:00'
+    });
+};
+
+module.exports = {
+    createDatabaseConnection,
+    createConnectionPool
+};
+
+// ====================================
+// 5. ENCRYPTION UTILITIES (utils/encryption.js)
+// ====================================
+const crypto = require('crypto');
+
+const ALGORITHM = 'aes-256-gcm';
+const ENCRYPTION_KEY = Buffer.from(process.env.ENCRYPTION_KEY, 'utf8');
+const IV_LENGTH = parseInt(process.env.ENCRYPTION_IV_LENGTH) || 16;
+
+const encryptData = async (plaintext) => {
+    try {
+        const iv = crypto.randomBytes(IV_LENGTH);
+        const cipher = crypto.createCipher(ALGORITHM, ENCRYPTION_KEY);
+        cipher.setAAD(Buffer.from('ethereum-wallet', 'utf8'));
+        
+        let encrypted = cipher.update(plaintext, 'utf8', 'hex');
+        encrypted += cipher.final('hex');
+        
+        const authTag = cipher.getAuthTag();
+        
+        return {
+            encrypted: encrypted,
+            iv: iv.toString('hex'),
+            authTag: authTag.toString('hex')
+        };
+    } catch (error) {
+        throw new Error(`Encryption failed: ${error.message}`);
+    }
+};
+
+const decryptData = async (encryptedData) => {
+    try {
+        const { encrypted, iv, authTag } = encryptedData;
+        const decipher = crypto.createDecipher(ALGORITHM, ENCRYPTION_KEY);
+        
+        decipher.setAAD(Buffer.from('ethereum-wallet', 'utf8'));
+        decipher.setAuthTag(Buffer.from(authTag, 'hex'));
+        
+        let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+        decrypted += decipher.final('utf8');
+        
+        return decrypted;
+    } catch (error) {
+        throw new Error(`Decryption failed: ${error.message}`);
+    }
+};
+
+const hashPassword = async (password) => {
+    const bcrypt = require('bcrypt');
+    const saltRounds = 12;
+    return await bcrypt.hash(password, saltRounds);
+};
+
+const verifyPassword = async (password, hashedPassword) => {
+    const bcrypt = require('bcrypt');
+    return await bcrypt.compare(password, hashedPassword);
+};
+
+module.exports = {
+    encryptData,
+    decryptData,
+    hashPassword,
+    verifyPassword
+};
+
+// ====================================
+// 6. ETHEREUM UTILITIES (utils/ethereum.js)
+// ====================================
+const { ethers } = require('ethers');
+
+const createEthereumProvider = () => {
+    const rpcUrl = process.env.NETWORK === 'testnet' 
+        ? process.env.ETHEREUM_TESTNET_RPC_URL 
+        : process.env.ETHEREUM_RPC_URL;
+    
+    return new ethers.JsonRpcProvider(rpcUrl);
+};
+
+const generateWallet = async () => {
+    try {
+        // Generate random mnemonic
+        const wallet = ethers.Wallet.createRandom();
+        
+        return {
+            address: wallet.address,
+            privateKey: wallet.privateKey,
+            publicKey: wallet.publicKey,
+            mnemonic: wallet.mnemonic.phrase
+        };
+    } catch (error) {
+        throw new Error(`Wallet generation failed: ${error.message}`);
+    }
+};
+
+const getWalletBalance = async (address) => {
+    try {
+        const provider = createEthereumProvider();
+        const balance = await provider.getBalance(address);
+        return balance.toString();
+    } catch (error) {
+        throw new Error(`Balance fetch failed: ${error.message}`);
+    }
+};
+
+const estimateGas = async (transaction) => {
+    try {
+        const provider = createEthereumProvider();
+        const gasEstimate = await provider.estimateGas(transaction);
+        const gasPrice = await provider.getFeeData();
+        
+        return {
+            gasLimit: gasEstimate.toString(),
+            gasPrice: gasPrice.gasPrice.toString(),
+            maxFeePerGas: gasPrice.maxFeePerGas?.toString(),
+            maxPriorityFeePerGas: gasPrice.maxPriorityFeePerGas?.toString()
+        };
+    } catch (error) {
+        throw new Error(`Gas estimation failed: ${error.message}`);
+    }
+};
+
+const sendTransaction = async (privateKey, transactionData) => {
+    try {
+        const provider = createEthereumProvider();
+        const wallet = new ethers.Wallet(privateKey, provider);
+        
+        const transaction = await wallet.sendTransaction(transactionData);
+        return transaction;
+    } catch (error) {
+        throw new Error(`Transaction failed: ${error.message}`);
+    }
+};
+
+const validateEthereumAddress = (address) => {
+    return ethers.isAddress(address);
+};
+
+const parseEther = (amount) => {
+    return ethers.parseEther(amount.toString());
+};
+
+const formatEther = (weiAmount) => {
+    return ethers.formatEther(weiAmount.toString());
+};
+
+module.exports = {
+    createEthereumProvider,
+    generateWallet,
+    getWalletBalance,
+    estimateGas,
+    sendTransaction,
+    validateEthereumAddress,
+    parseEther,
+    formatEther
+};
+
+// ====================================
+// 7. VALIDATION SCHEMAS (middleware/validation.js)
+// ====================================
+const Joi = require('joi');
+
+const createWalletSchema = Joi.object({
+    walletName: Joi.string().min(1).max(100).optional()
+});
+
+const sendTransactionSchema = Joi.object({
+    toAddress: Joi.string().required().custom((value, helpers) => {
+        const { validateEthereumAddress } = require('../utils/ethereum');
+        if (!validateEthereumAddress(value)) {
+            return helpers.error('any.invalid');
+        }
+        return value;
+    }, 'Ethereum address validation'),
+    amount: Joi.string().required().pattern(/^\d+(\.\d+)?$/).message('Amount must be a valid number'),
+    gasPrice: Joi.string().optional().pattern(/^\d+$/).message('Gas price must be a valid integer'),
+    gasLimit: Joi.string().optional().pattern(/^\d+$/).message('Gas limit must be a valid integer')
+});
+
+const validateRequest = (schema) => {
+    return (req, res, next) => {
+        const { error } = schema.validate(req.body);
+        if (error) {
+            return res.status(400).json({
+                success: false,
+                message: 'Validation error',
+                errors: error.details.map(detail => detail.message)
+            });
+        }
+        next();
+    };
+};
+
+module.exports = {
+    createWalletSchema,
+    sendTransactionSchema,
+    validateRequest
+};
+
+// ====================================
+// 8. AUTHENTICATION MIDDLEWARE (middleware/auth.js)
+// ====================================
+const jwt = require('jsonwebtoken');
+const { createConnectionPool } = require('../config/database');
+
+const authenticateToken = async (req, res, next) => {
+    try {
+        const authHeader = req.headers['authorization'];
+        const token = authHeader && authHeader.split(' ')[1];
+
+        if (!token) {
+            return res.status(401).json({
+                success: false,
+                message: 'Access token required'
+            });
+        }
+
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        
+        // Verify user exists and is active
+        const pool = createConnectionPool();
+        const [users] = await pool.execute(
+            'SELECT id, username, email, is_active FROM users WHERE id = ? AND is_active = TRUE',
+            [decoded.userId]
+        );
+
+        if (users.length === 0) {
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid or expired token'
+            });
+        }
+
+        req.user = users[0];
+        next();
+    } catch (error) {
+        if (error.name === 'JsonWebTokenError') {
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid token'
+            });
+        }
+        
+        return res.status(500).json({
+            success: false,
+            message: 'Authentication error'
+        });
+    }
+};
+
+module.exports = {
+    authenticateToken
+};
+
+// ====================================
+// 9. RATE LIMITING MIDDLEWARE (middleware/rateLimiter.js)
+// ====================================
+const { createConnectionPool } = require('../config/database');
+
+const rateLimiter = (endpoint, maxRequests = 10, windowMs = 900000) => {
+    return async (req, res, next) => {
+        try {
+            const userId = req.user.id;
+            const pool = createConnectionPool();
+            
+            const now = new Date();
+            const windowStart = new Date(now.getTime() - windowMs);
+
+            // Clean old entries
+            await pool.execute(
+                'DELETE FROM rate_limits WHERE window_start < ?',
+                [windowStart]
+            );
+
+            // Check current rate limit
+            const [existing] = await pool.execute(
+                'SELECT request_count FROM rate_limits WHERE user_id = ? AND endpoint = ? AND window_start > ?',
+                [userId, endpoint, windowStart]
+            );
+
+            if (existing.length > 0) {
+                const currentCount = existing[0].request_count;
+                
+                if (currentCount >= maxRequests) {
+                    return res.status(429).json({
+                        success: false,
+                        message: 'Rate limit exceeded. Please try again later.',
+                        retryAfter: Math.ceil(windowMs / 1000)
+                    });
+                }
+
+                // Update count
+                await pool.execute(
+                    'UPDATE rate_limits SET request_count = request_count + 1 WHERE user_id = ? AND endpoint = ?',
+                    [userId, endpoint]
+                );
+            } else {
+                // Create new entry
+                await pool.execute(
+                    'INSERT INTO rate_limits (user_id, endpoint, request_count, window_start) VALUES (?, ?, 1, ?)',
+                    [userId, endpoint, now]
+                );
+            }
+
+            next();
+        } catch (error) {
+            console.error('Rate limiter error:', error);
+            next(); // Continue on rate limiter error
+        }
+    };
+};
+
+module.exports = {
+    rateLimiter
+};
+
+// ====================================
+// 10. AUDIT LOGGING (utils/auditLogger.js)
+// ====================================
+const { createConnectionPool } = require('../config/database');
+
+const logAuditEvent = async (userId, action, resourceType, resourceId, req, details = null) => {
+    try {
+        const pool = createConnectionPool();
+        const ipAddress = req.ip || req.connection.remoteAddress;
+        const userAgent = req.get('User-Agent');
+
+        await pool.execute(
+            `INSERT INTO audit_logs (user_id, action, resource_type, resource_id, ip_address, user_agent, details) 
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [userId, action, resourceType, resourceId, ipAddress, userAgent, JSON.stringify(details)]
+        );
+    } catch (error) {
+        console.error('Audit logging failed:', error);
+    }
+};
+
+module.exports = {
+    logAuditEvent
+};
+
+// ====================================
+// 11. WALLET SERVICE (services/walletService.js)
+// ====================================
+const { createConnectionPool } = require('../config/database');
+const { encryptData, decryptData } = require('../utils/encryption');
+const { generateWallet, getWalletBalance } = require('../utils/ethereum');
+const { logAuditEvent } = require('../utils/auditLogger');
+
+const createUserWallet = async (userId, walletName = 'Primary Wallet', req) => {
+    const pool = createConnectionPool();
+    let connection;
+    
+    try {
+        connection = await pool.getConnection();
+        await connection.beginTransaction();
+
+        // Check if user already has a wallet
+        const [existingWallets] = await connection.execute(
+            'SELECT id FROM wallets WHERE user_id = ? AND is_active = TRUE',
+            [userId]
+        );
+
+        if (existingWallets.length > 0) {
+            throw new Error('User already has an active wallet');
+        }
+
+        // Generate new wallet
+        const walletData = await generateWallet();
+
+        // Encrypt sensitive data
+        const encryptedPrivateKey = await encryptData(walletData.privateKey);
+        const encryptedMnemonic = await encryptData(walletData.mnemonic);
+
+        // Insert wallet into database
+        const [result] = await connection.execute(
+            `INSERT INTO wallets (user_id, wallet_address, encrypted_private_key, encrypted_mnemonic, 
+             public_key, wallet_name, balance_wei) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+                userId,
+                walletData.address,
+                JSON.stringify(encryptedPrivateKey),
+                JSON.stringify(encryptedMnemonic),
+                walletData.publicKey,
+                walletName,
+                '0'
+            ]
+        );
+
+        const walletId = result.insertId;
+
+        await connection.commit();
+
+        // Log audit event
+        await logAuditEvent(userId, 'WALLET_CREATED', 'wallet', walletId, req, {
+            walletAddress: walletData.address,
+            walletName
+        });
+
+        return {
+            id: walletId,
+            address: walletData.address,
+            publicKey: walletData.publicKey,
+            walletName,
+            balance: '0'
+        };
+
+    } catch (error) {
+        if (connection) {
+            await connection.rollback();
+        }
+        throw error;
+    } finally {
+        if (connection) {
+            connection.release();
+        }
+    }
+};
+
+const getUserWallet = async (userId) => {
+    try {
+        const pool = createConnectionPool();
+        const [wallets] = await pool.execute(
+            `SELECT id, wallet_address, public_key, wallet_name, balance_wei, created_at 
+             FROM wallets WHERE user_id = ? AND is_active = TRUE`,
+            [userId]
+        );
+
+        if (wallets.length === 0) {
+            return null;
+        }
+
+        const wallet = wallets[0];
+        
+        // Get fresh balance from blockchain
+        try {
+            const currentBalance = await getWalletBalance(wallet.wallet_address);
+            
+            // Update balance in database
+            await pool.execute(
+                'UPDATE wallets SET balance_wei = ? WHERE id = ?',
+                [currentBalance, wallet.id]
+            );
+            
+            wallet.balance_wei = currentBalance;
+        } catch (balanceError) {
+            console.error('Failed to fetch balance:', balanceError);
+        }
+
+        return {
+            id: wallet.id,
+            address: wallet.wallet_address,
+            publicKey: wallet.public_key,
+            walletName: wallet.wallet_name,
+            balance: wallet.balance_wei,
+            createdAt: wallet.created_at
+        };
+
+    } catch (error) {
+        throw new Error(`Failed to retrieve wallet: ${error.message}`);
+    }
+};
+
+const getDecryptedPrivateKey = async (walletId, userId) => {
+    try {
+        const pool = createConnectionPool();
+        const [wallets] = await pool.execute(
+            'SELECT encrypted_private_key FROM wallets WHERE id = ? AND user_id = ? AND is_active = TRUE',
+            [walletId, userId]
+        );
+
+        if (wallets.length === 0) {
+            throw new Error('Wallet not found');
+        }
+
+        const encryptedData = JSON.parse(wallets[0].encrypted_private_key);
+        const privateKey = await decryptData(encryptedData);
+        
+        return privateKey;
+    } catch (error) {
+        throw new Error(`Failed to decrypt private key: ${error.message}`);
+    }
+};
+
+const updateWalletNonce = async (walletId) => {
+    try {
+        const pool = createConnectionPool();
+        await pool.execute(
+            'UPDATE wallets SET nonce_counter = nonce_counter + 1 WHERE id = ?',
+            [walletId]
+        );
+    } catch (error) {
+        console.error('Failed to update nonce:', error);
+    }
+};
+
+module.exports = {
+    createUserWallet,
+    getUserWallet,
+    getDecryptedPrivateKey,
+    updateWalletNonce
+};
+
+// ====================================
+// 12. TRANSACTION SERVICE (services/transactionService.js)
+// ====================================
+const { createConnectionPool } = require('../config/database');
+const { sendTransaction, estimateGas, parseEther, formatEther } = require('../utils/ethereum');
+const { getDecryptedPrivateKey, updateWalletNonce } = require('./walletService');
+const { logAuditEvent } = require('../utils/auditLogger');
+
+const calculateServiceFee = (amountWei) => {
+    const feeRate = parseInt(process.env.SERVICE_FEE_BASIS_POINTS) || 50; // 0.5% default
+    const serviceFee = (BigInt(amountWei) * BigInt(feeRate)) / BigInt(10000);
+    return serviceFee.toString();
+};
+
+const sendEthereumTransaction = async (userId, transactionData, req) => {
+    const pool = createConnectionPool();
+    let connection;
+    
+    try {
+        connection = await pool.getConnection();
+        await connection.beginTransaction();
+
+        const { toAddress, amount, gasPrice, gasLimit } = transactionData;
+
+        // Get user's wallet
+        const [wallets] = await connection.execute(
+            'SELECT id, wallet_address FROM wallets WHERE user_id = ? AND is_active = TRUE',
+            [userId]
+        );
+
+        if (wallets.length === 0) {
+            throw new Error('No active wallet found');
+        }
+
+        const wallet = wallets[0];
+        const amountWei = parseEther(amount).toString();
+        const serviceFeeWei = calculateServiceFee(amountWei);
+        const totalAmountWei = (BigInt(amountWei) + BigInt(serviceFeeWei)).toString();
+
+        // Prepare transaction object
+        const txData = {
+            to: toAddress,
+            value: amountWei,
+            gasPrice: gasPrice || undefined,
+            gasLimit: gasLimit || undefined
+        };
+
+        // Estimate gas if not provided
+        if (!gasPrice || !gasLimit) {
+            const gasEstimate = await estimateGas(txData);
+            txData.gasPrice = txData.gasPrice || gasEstimate.gasPrice;
+            txData.gasLimit = txData.gasLimit || gasEstimate.gasLimit;
+        }
+
+        const transactionFeeWei = (BigInt(txData.gasPrice) * BigInt(txData.gasLimit)).toString();
+
+        // Create transaction record
+        const [result] = await connection.execute(
+            `INSERT INTO transactions (wallet_id, from_address, to_address, amount_wei, 
+             gas_price, gas_limit, transaction_fee_wei, service_fee_wei, status) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+            [
+                wallet.id,
+                wallet.wallet_address,
+                toAddress,
+                amountWei,
+                txData.gasPrice,
+                txData.gasLimit,
+                transactionFeeWei,
+                serviceFeeWei
+            ]
+        );
+
+        const transactionId = result.insertId;
+
+        // Get private key and send transaction
+        const privateKey = await getDecryptedPrivateKey(wallet.id, userId);
+        const txResponse = await sendTransaction(privateKey, txData);
+
+        // Update transaction with hash
+        await connection.execute(
+            'UPDATE transactions SET transaction_hash = ? WHERE id = ?',
+            [txResponse.hash, transactionId]
+        );
+
+        // Update wallet nonce
+        await updateWalletNonce(wallet.id);
+
+        await connection.commit();
+
+        // Log audit event
+        await logAuditEvent(userId, 'TRANSACTION_SENT', 'transaction', transactionId, req, {
+            transactionHash: txResponse.hash,
+            toAddress,
+            amount: formatEther(amountWei),
+            serviceFee: formatEther(serviceFeeWei)
+        });
+
+        return {
+            transactionId,
+            transactionHash: txResponse.hash,
+            fromAddress: wallet.wallet_address,
+            toAddress,
+            amount: formatEther(amountWei),
+            serviceFee: formatEther(serviceFeeWei),
+            estimatedFee: formatEther(transactionFeeWei),
+            status: 'pending'
+        };
+
+    } catch (error) {
+        if (connection) {
+            await connection.rollback();
+        }
+        throw new Error(`Transaction failed: ${error.message}`);
+    } finally {
+        if (connection) {
+            connection.release();
+        }
+    }
+};
+
+const getTransactionHistory = async (userId, limit = 50, offset = 0) => {
+    try {
+        const pool = createConnectionPool();
+        const [transactions] = await pool.execute(
+            `SELECT t.id, t.transaction_hash, t.from_address, t.to_address, 
+             t.amount_wei, t.gas_used, t.transaction_fee_wei, t.service_fee_wei, 
+             t.status, t.transaction_type, t.created_at, t.confirmed_at, t.block_number
+             FROM transactions t
+             JOIN wallets w ON t.wallet_id = w.id
+             WHERE w.user_id = ?
+             ORDER BY t.created_at DESC
+             LIMIT ? OFFSET ?`,
+            [userId, limit, offset]
+        );
+
+        return transactions.map(tx => ({
+            id: tx.id,
+            transactionHash: tx.transaction_hash,
+            fromAddress: tx.from_address,
+            toAddress: tx.to_address,
+            amount: formatEther(tx.amount_wei),
+            gasUsed: tx.gas_used,
+            transactionFee: tx.transaction_fee_wei ? formatEther(tx.transaction_fee_wei) : null,
+            serviceFee: formatEther(tx.service_fee_wei),
+            status: tx.status,
+            type: tx.transaction_type,
+            createdAt: tx.created_at,
+            confirmedAt: tx.confirmed_at,
+            blockNumber: tx.block_number
+        }));
+
+    } catch (error) {
+        throw new Error(`Failed to retrieve transaction history: ${error.message}`);
+    }
+};
+
+const updateTransactionStatus = async (transactionHash, status, blockNumber = null, gasUsed = null) => {
+    try {
+        const pool = createConnectionPool();
+        const updateData = [status];
+        let query = 'UPDATE transactions SET status = ?';
+        
+        if (blockNumber) {
+            query += ', block_number = ?';
+            updateData.push(blockNumber);
+        }
+        
+        if (gasUsed) {
+            query += ', gas_used = ?';
+            updateData.push(gasUsed);
+        }
+        
+        if (status === 'confirmed') {
+            query += ', confirmed_at = CURRENT_TIMESTAMP';
+        }
+        
+        query += ' WHERE transaction_hash = ?';
+        updateData.push(transactionHash);
+
+        await pool.execute(query, updateData);
+    } catch (error) {
+        console.
+
+
+ethereum-wallet-backend/
+├── server.js                    # Main server file
+├── package.json                 # Dependencies
+├── .env                        # Environment variables
+├── config/
+│   └── database.js             # Database connection
+├── middleware/
+│   ├── auth.js                 # JWT authentication
+│   ├── rateLimiter.js          # Custom rate limiting
+│   └── validation.js           # Request validation
+├── utils/
+│   ├── encryption.js           # AES-256 encryption
+│   ├── ethereum.js             # Ethereum utilities
+│   └── auditLogger.js          # Security logging
+├── services/
+│   ├── walletService.js        # Wallet management
+│   ├── transactionService.js   # Transaction handling
+│   └── fundingService.js       # Auto-funding logic
+├── controllers/
+│   ├── authController.js       # Authentication
+│   ├── walletController.js     # Wallet endpoints
+│   └── transactionController.js # Transaction endpoints
+├── routes/
+│   ├── authRoutes.js           # Auth routes
+│   ├── walletRoutes.js         # Wallet routes
+│   └── transactionRoutes.js    # Transaction routes
+└── scripts/
+    └── deploy.js               # Deployment checklist
